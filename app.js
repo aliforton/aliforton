@@ -15,7 +15,7 @@ class App {
         document.body.appendChild(container);
 
         this.assetsPath = './assets/';
-        
+
         this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 500);
         this.camera.position.set(0, 1.6, 0);
 
@@ -52,15 +52,18 @@ class App {
 
         this.loadingBar = new LoadingBar();
 
-        this.loadModels();
-        
+        this.loadCollege();
+        this.loadNewModel();  // Load the new model
+
         this.immersive = false;
 
-        this.boardShown = '';
-        fetch('./assets/boardData.json')
+        const self = this;
+
+        fetch('./college.json')
             .then(response => response.json())
             .then(obj => {
-                this.boardData = obj;
+                self.boardShown = '';
+                self.boardData = obj;
             });
     }
 
@@ -70,11 +73,13 @@ class App {
         pmremGenerator.compileEquirectangularShader();
 
         const self = this;
+
         loader.load('./assets/hdr/venice_sunset_1k.hdr', (texture) => {
             const envMap = pmremGenerator.fromEquirectangular(texture).texture;
             pmremGenerator.dispose();
 
             self.scene.environment = envMap;
+
         }, undefined, (err) => {
             console.error('An error occurred setting the environment');
         });
@@ -86,41 +91,100 @@ class App {
         this.renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    loadModels() {
+    loadCollege() {
         const loader = new GLTFLoader().setPath(this.assetsPath);
         const dracoLoader = new DRACOLoader();
-        dracoLoader.setDecoderPath('./libs/three/jsm/draco/');
+        dracoLoader.setDecoderPath('./libs/three/js/draco/');
         loader.setDRACOLoader(dracoLoader);
 
         const self = this;
 
         // Load a glTF resource
-        loader.load('models/model1.glb', (gltf) => {
-            const model1 = gltf.scene.children[0];
-            self.scene.add(model1);
+        loader.load(
+            // resource URL
+            'college.glb',
+            // called when the resource is loaded
+            function (gltf) {
 
-            loader.load('models/model2.glb', (gltf) => {
-                const model2 = gltf.scene.children[0];
-                model2.position.set(2, 0, 0);
-                self.scene.add(model2);
+                const college = gltf.scene.children[0];
+                self.scene.add(college);
 
-                loader.load('models/model3.glb', (gltf) => {
-                    const model3 = gltf.scene.children[0];
-                    model3.position.set(-2, 0, 0);
-                    self.scene.add(model3);
-
-                    self.loadingBar.visible = false;
-                    self.setupXR();
+                college.traverse(function (child) {
+                    if (child.isMesh) {
+                        if (child.name.indexOf("PROXY") != -1) {
+                            child.material.visible = false;
+                            self.proxy = child;
+                        } else if (child.material.name.indexOf('Glass') != -1) {
+                            child.material.opacity = 0.1;
+                            child.material.transparent = true;
+                        } else if (child.material.name.indexOf("SkyBox") != -1) {
+                            const mat1 = child.material;
+                            const mat2 = new THREE.MeshBasicMaterial({ map: mat1.map });
+                            child.material = mat2;
+                            mat1.dispose();
+                        }
+                    }
                 });
-            });
-        });
+
+                const door1 = college.getObjectByName("LobbyShop_Door__1_");
+                const door2 = college.getObjectByName("LobbyShop_Door__2_");
+                const pos = door1.position.clone().sub(door2.position).multiplyScalar(0.5).add(door2.position);
+                const obj = new THREE.Object3D();
+                obj.name = "LobbyShop";
+                obj.position.copy(pos);
+                college.add(obj);
+
+                self.loadingBar.visible = false;
+
+                self.setupXR();
+            },
+            // called while loading is progressing
+            function (xhr) {
+                self.loadingBar.progress = (xhr.loaded / xhr.total);
+            },
+            // called when loading has errors
+            function (error) {
+                console.log('An error happened');
+            }
+        );
+    }
+
+    loadNewModel() {
+        const loader = new GLTFLoader().setPath(this.assetsPath);
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath('./libs/three/js/draco/');
+        loader.setDRACOLoader(dracoLoader);
+
+        const self = this;
+
+        loader.load(
+            'coral_fish.glb',  // Replace with the actual filename of your 3D model
+            function (gltf) {
+                const newModel = gltf.scene;
+                self.scene.add(newModel);
+
+                // Adjust the position and scale of the new model if needed
+                newModel.position.set(0, 0, 0);
+                newModel.scale.set(1, 1, 1);
+
+                self.loadingBar.visible = false;
+            },
+            function (xhr) {
+                self.loadingBar.progress = (xhr.loaded / xhr.total);
+            },
+            function (error) {
+                console.log('An error happened');
+            }
+        );
     }
 
     setupXR() {
         this.renderer.xr.enabled = true;
+
         const btn = new VRButton(this.renderer);
 
         const self = this;
+
         const timeoutId = setTimeout(connectionTimeout, 2000);
 
         function onSelectStart(event) {
@@ -199,5 +263,99 @@ class App {
         pos.y += 1;
 
         let dir = new THREE.Vector3();
+        // Store original dolly rotation
         const quaternion = this.dolly.quaternion.clone();
-        this.dolly.quaternion.copy(this.dummyCam
+        // Get rotation for movement from the headset pose
+        this.dolly.quaternion.copy(this.dummyCam.getWorldQuaternion(this.workingQuaternion));
+        this.dolly.getWorldDirection(dir);
+        dir.negate();
+        this.raycaster.set(pos, dir);
+
+        let blocked = false;
+
+        let intersect = this.raycaster.intersectObject(this.proxy);
+        if (intersect.length > 0) {
+            if (intersect[0].distance < wallLimit) blocked = true;
+        }
+
+        if (!blocked) {
+            this.dolly.translateZ(-dt * speed);
+            pos = this.dolly.getWorldPosition(this.origin);
+        }
+
+        //cast left
+        dir.set(-1, 0, 0);
+        dir.applyMatrix4(this.dolly.matrix);
+        dir.normalize();
+        this.raycaster.set(pos, dir);
+
+        intersect = this.raycaster.intersectObject(this.proxy);
+        if (intersect.length > 0) {
+            if (intersect[0].distance < wallLimit) this.dolly.translateX(wallLimit - intersect[0].distance);
+        }
+
+        //cast right
+        dir.set(1, 0, 0);
+        dir.applyMatrix4(this.dolly.matrix);
+        dir.normalize();
+        this.raycaster.set(pos, dir);
+
+        intersect = this.raycaster.intersectObject(this.proxy);
+        if (intersect.length > 0) {
+            if (intersect[0].distance < wallLimit) this.dolly.translateX(intersect[0].distance - wallLimit);
+        }
+
+        //cast down
+        dir.set(0, -1, 0);
+        pos.y += 1.5;
+        this.raycaster.set(pos, dir);
+
+        intersect = this.raycaster.intersectObject(this.proxy);
+        if (intersect.length > 0) {
+            this.dolly.position.copy(intersect[0].point);
+        }
+
+        // Restore the original rotation
+        this.dolly.quaternion.copy(quaternion);
+    }
+
+    get selectPressed() {
+        return (this.controllers !== undefined && (this.controllers[0].userData.selectPressed || this.controllers[1].userData.selectPressed));
+    }
+
+    handleController(controller) {
+        if (controller.userData.selectPressed) {
+            if (this.board !== undefined) {
+                const ray = this.gazeController.getRay();
+                this.raycaster.set(ray.origin, ray.direction);
+                const intersect = this.raycaster.intersectObject(this.board.mesh);
+                if (intersect.length == 0) {
+                    this.scene.remove(this.board);
+                    this.board = undefined;
+                }
+            }
+        }
+    }
+
+    render(timestamp, frame) {
+        const dt = this.clock.getDelta();
+        if (this.proxy !== undefined) this.moveDolly(dt);
+
+        if (this.renderer.xr.isPresenting) {
+            if (this.useGaze) {
+                this.gazeController.update();
+            } else {
+                this.controllers.forEach(controller => {
+                    this.handleController(controller);
+                });
+            }
+
+            this.ui.update();
+        }
+
+        this.stats.update();
+        this.renderer.render(this.scene, this.camera);
+    }
+}
+
+export { App };
